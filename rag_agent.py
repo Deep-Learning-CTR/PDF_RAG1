@@ -71,7 +71,7 @@ def search_query(query, n_results=3):
 
 def rag_pipeline(user_query, system_prompt=None):
     if system_prompt is None:
-        system_prompt = "You are a helpful assistant. Use context from the PDF to answer questions. If insufficient context, say so."
+        system_prompt = "You are a helpful assistant. Please use context from the PDF to answer questions. If insufficient context, say so."
 
     results = search_query(user_query)
     chunks = results["documents"][0]
@@ -103,6 +103,15 @@ def generate_answer_gemini(user_query):
 # -------------------------------
 st.title("📄 RAG PDF Assistant with Gemini + ChromaDB")
 
+# Sidebar for configuration
+st.sidebar.header("⚙️ RAG Settings")
+chunk_size = st.sidebar.slider("Chunk Size", min_value=200, max_value=2000, value=1000, step=100)
+chunk_overlap = st.sidebar.slider("Chunk Overlap", min_value=0, max_value=500, value=200, step=50)
+top_k = st.sidebar.slider("Top K (retrieved chunks)", min_value=1, max_value=10, value=3, step=1)
+# temperature = st.sidebar.slider("LLM Temperature", min_value=0.0, max_value=1.0, value=0, step=0.05)
+# Add reprocess button
+reprocess = st.sidebar.button("🔄 Reprocess PDF")
+
 uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
 
 if uploaded_file is not None:
@@ -110,30 +119,83 @@ if uploaded_file is not None:
     with open(pdf_path, "wb") as f:
         f.write(uploaded_file.read())
 
-    st.success("PDF uploaded successfully! Processing...")
+    st.success("PDF uploaded successfully!")
 
-    documents = extract_text_from_pdf(pdf_path)
-    chunks = split_chunk_overlap(documents)
-    texts, embeddings = embed_chunks(chunks)
+    # Check if first upload or reprocess is requested
+    if reprocess or collection.count() == 0:
+        st.info("Processing PDF with current chunk settings...")
 
-    if collection.count() == 0:
+        # Always reset collection when reprocessing
+        client.delete_collection("pdf_collection")
+        collection = client.create_collection("pdf_collection")
+
+        documents = extract_text_from_pdf(pdf_path)
+
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap
+        )
+        chunks = splitter.split_documents(documents)
+
+        texts, embeddings = embed_chunks(chunks)
         store_in_chromadb(collection, chunks, embeddings)
-        st.info(f"Stored {len(chunks)} chunks in ChromaDB.")
+
+        st.success(f"Stored {len(chunks)} chunks with chunk_size={chunk_size}, overlap={chunk_overlap}.")
     else:
         st.info("Using existing ChromaDB collection.")
-
     # Chat Interface
     st.subheader("Ask questions about the document")
     query = st.text_input("Your Question")
 
     if query:
         with st.spinner("Generating answer..."):
-            answer, retrieved_chunks, metadatas = generate_answer_gemini(query)
+            def search_query(query, n_results=3):
+                query_embedding = model.encode([query])
+                results = collection.query(
+                    query_embeddings=query_embedding.tolist(),
+                    n_results=n_results
+                )
+                return results
+
+            def rag_pipeline(user_query, system_prompt=None):
+                if system_prompt is None:
+                    system_prompt = "You are a helpful assistant.Please use context from the PDF to answer questions. If insufficient context, say so."
+
+                results = search_query(user_query, n_results=top_k)
+                chunks = results["documents"][0]
+                metadatas = results["metadatas"][0]
+                scores = results["distances"][0]  # similarity scores
+
+                context = "\n\n".join(
+                    [f"Context {i+1} (Score: {scores[i]:.4f}):\n{chunk}" 
+                     for i, chunk in enumerate(chunks)]
+                )
+
+                prompt = f"""{system_prompt}
+
+Context:
+{context}
+
+User Question: {user_query}
+
+Answer:"""
+                return prompt, chunks, metadatas, scores
+
+            def generate_answer_gemini(user_query):
+                prompt, chunks, metadatas, scores = rag_pipeline(user_query)
+                response = llm.models.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=prompt,
+                    config={"temperature": 0}
+                )
+                return response.text, chunks, metadatas, scores
+
+            answer, retrieved_chunks, metadatas, scores = generate_answer_gemini(query)
 
         st.markdown("### 🤖 Answer")
         st.write(answer)
 
         with st.expander("📖 Retrieved Context"):
-            for i, (chunk, meta) in enumerate(zip(retrieved_chunks, metadatas)):
-                st.markdown(f"**Context {i+1} (Page {meta['page']})**")
-                st.write(chunk[:500] + ("..." if len(chunk) > 500 else ""))
+            for i, (chunk, meta, score) in enumerate(zip(retrieved_chunks, metadatas, scores)):
+                st.markdown(f"**Context {i+1} (Page {meta['page']}, Score: {score:.4f})**")
+                st.write(chunk)  # show full chunk without truncation
