@@ -3,6 +3,6 @@ chromadb
 langchain-community
 langchain
 sentence-transformers
-google-genai
+cerebras-cloud-sdk
 python-dotenv
 pypdf

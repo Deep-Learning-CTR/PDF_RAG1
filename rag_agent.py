@@ -5,7 +5,7 @@ import chromadb
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
-from google import genai
+from cerebras.cloud.sdk import Cerebras
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -27,8 +27,8 @@ def load_embedding_model(model_name):
     else:
         return SentenceTransformer(model_name)
 
-# Initialize Gemini client
-llm = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+# Initialize Cerebras client
+llm = Cerebras(api_key=os.environ.get("CEREBRAS_API_KEY"))
 
 # -------------------------------
 # Helper Functions
@@ -122,14 +122,14 @@ Question: {user_query}
 Answer:"""
     return prompt, chunks, metadatas, scores
 
-def generate_answer_gemini(user_query, top_k=3):
+def generate_answer_cerebras(user_query, model_name="llama-4-scout-17b-16e-instruct", top_k=3):
     prompt, chunks, metadatas, scores = rag_pipeline(user_query, top_k=top_k)
-    response = llm.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
-        config={"temperature": 0}
+    response = llm.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
     )
-    return response.text, chunks, metadatas, scores
+    return response.choices[0].message.content, chunks, metadatas, scores
 
 # -------------------------------
 # Chat Management Functions
@@ -202,7 +202,7 @@ if "current_embedding_model" not in st.session_state:
 # -------------------------------
 # Streamlit Interface
 # -------------------------------
-st.title("📄 RAG PDF Assistant with Gemini + ChromaDB")
+st.title("📄 RAG PDF Assistant with Cerebras + ChromaDB")
 
 # Sidebar for configuration
 st.sidebar.header("⚙️ RAG Settings")
@@ -216,7 +216,24 @@ embedding_model_option = st.sidebar.selectbox(
 
 # Load the selected embedding model
 model = load_embedding_model(embedding_model_option)
-st.sidebar.info(f"📊 Current model: {embedding_model_option}")
+st.sidebar.info(f"📊 Current embedding model: {embedding_model_option}")
+
+# LLM model selection
+llm_models = {
+    "Llama 4 Scout (17B)": "llama-4-scout-17b-16e-instruct",
+    "Llama 3.1 8B": "llama3.1-8b",
+    "Llama 3.3 70B": "llama-3.3-70b",
+    "OpenAI GPT OSS (120B)": "gpt-oss-120b",
+    "Qwen 3 32B": "qwen-3-32b"
+}
+
+llm_model_display = st.sidebar.selectbox(
+    "LLM Model",
+    list(llm_models.keys()),
+    index=0
+)
+llm_model_option = llm_models[llm_model_display]
+st.sidebar.info(f"🤖 Current LLM: {llm_model_display}")
 
 chunk_size = st.sidebar.slider("Chunk Size", min_value=200, max_value=2000, value=1000, step=100)
 chunk_overlap = st.sidebar.slider("Chunk Overlap", min_value=0, max_value=500, value=200, step=50)
@@ -350,16 +367,16 @@ Question: {user_query}
 Answer:"""
                     return prompt, chunks, metadatas, scores
 
-                def generate_answer_gemini(user_query):
+                def generate_answer_cerebras(user_query, model_name):
                     prompt, chunks, metadatas, scores = rag_pipeline(user_query)
-                    response = llm.models.generate_content(
-                        model="gemini-2.0-flash",
-                        contents=prompt,
-                        config={"temperature": 0}
+                    response = llm.chat.completions.create(
+                        model=model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0
                     )
-                    return response.text, chunks, metadatas, scores
+                    return response.choices[0].message.content, chunks, metadatas, scores
 
-                answer, retrieved_chunks, metadatas, scores = generate_answer_gemini(query)
+                answer, retrieved_chunks, metadatas, scores = generate_answer_cerebras(query, llm_model_option)
 
             # Display assistant response
             st.write(answer)
