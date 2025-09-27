@@ -36,6 +36,18 @@ def extract_text_from_pdf(pdf_path):
     loader = PyPDFLoader(pdf_path)
     return loader.load()
 
+def extract_text_from_multiple_pdfs(pdf_paths):
+    all_documents = []
+    for pdf_path in pdf_paths:
+        loader = PyPDFLoader(pdf_path)
+        documents = loader.load()
+        # Update metadata to include the original filename
+        filename = os.path.basename(pdf_path)
+        for doc in documents:
+            doc.metadata['filename'] = filename
+        all_documents.extend(documents)
+    return all_documents
+
 def split_chunk_overlap(documents):
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     return splitter.split_documents(documents)
@@ -50,6 +62,7 @@ def store_in_chromadb(collection, chunks, embeddings):
     ids = [f"chunk_{i}" for i in range(len(chunks))]
     metadatas = [
         {"source": chunk.metadata.get("source", "unknown"),
+         "filename": chunk.metadata.get("filename", "unknown"),
          "page": chunk.metadata.get("page", 0),
          "chunk_index": i}
         for i, chunk in enumerate(chunks)
@@ -112,24 +125,28 @@ top_k = st.sidebar.slider("Top K (retrieved chunks)", min_value=1, max_value=10,
 # Add reprocess button
 reprocess = st.sidebar.button("🔄 Reprocess PDF")
 
-uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
+uploaded_files = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True)
 
-if uploaded_file is not None:
-    pdf_path = os.path.join("temp.pdf")
-    with open(pdf_path, "wb") as f:
-        f.write(uploaded_file.read())
+if uploaded_files:
+    # Save all uploaded files
+    pdf_paths = []
+    for i, uploaded_file in enumerate(uploaded_files):
+        pdf_path = os.path.join(f"temp_{i}_{uploaded_file.name}")
+        with open(pdf_path, "wb") as f:
+            f.write(uploaded_file.read())
+        pdf_paths.append(pdf_path)
 
-    st.success("PDF uploaded successfully!")
+    st.success(f"{len(uploaded_files)} PDF files uploaded successfully!")
 
     # Check if first upload or reprocess is requested
     if reprocess or collection.count() == 0:
-        st.info("Processing PDF with current chunk settings...")
+        st.info(f"Processing {len(uploaded_files)} PDF files with current chunk settings...")
 
         # Always reset collection when reprocessing
         client.delete_collection("pdf_collection")
         collection = client.create_collection("pdf_collection")
 
-        documents = extract_text_from_pdf(pdf_path)
+        documents = extract_text_from_multiple_pdfs(pdf_paths)
 
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
@@ -140,11 +157,11 @@ if uploaded_file is not None:
         texts, embeddings = embed_chunks(chunks)
         store_in_chromadb(collection, chunks, embeddings)
 
-        st.success(f"Stored {len(chunks)} chunks with chunk_size={chunk_size}, overlap={chunk_overlap}.")
+        st.success(f"Stored {len(chunks)} chunks from {len(uploaded_files)} PDF files with chunk_size={chunk_size}, overlap={chunk_overlap}.")
     else:
         st.info("Using existing ChromaDB collection.")
     # Chat Interface
-    st.subheader("Ask questions about the document")
+    st.subheader("Ask questions about the documents")
     query = st.text_input("Your Question")
 
     if query:
@@ -197,5 +214,6 @@ Answer:"""
 
         with st.expander("📖 Retrieved Context"):
             for i, (chunk, meta, score) in enumerate(zip(retrieved_chunks, metadatas, scores)):
-                st.markdown(f"**Context {i+1} (Page {meta['page']}, Score: {score:.4f})**")
+                filename = meta.get('filename', 'unknown')
+                st.markdown(f"**Context {i+1} ({filename}, Page {meta['page']}, Score: {score:.4f})**")
                 st.write(chunk)  # show full chunk without truncation
