@@ -1,5 +1,6 @@
 import streamlit as st
 import os
+import datetime
 import chromadb
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -82,34 +83,118 @@ def search_query(query, n_results=3):
     )
     return results
 
-def rag_pipeline(user_query, system_prompt=None):
+def rag_pipeline(user_query, system_prompt=None, top_k=3):
     if system_prompt is None:
         system_prompt = "You are a helpful assistant. Please use context from the PDF to answer questions. If insufficient context, say so."
 
-    results = search_query(user_query)
+    results = search_query(user_query, n_results=top_k)
     chunks = results["documents"][0]
     metadatas = results["metadatas"][0]
+    scores = results["distances"][0]
 
-    context = "\n\n".join([f"Context {i+1}:\n{chunk}" for i, chunk in enumerate(chunks)])
+    # Get recent conversation for context
+    conversation_context = get_recent_conversation(n=3)
 
-    prompt = f"""{system_prompt}
+    # Build retrieved context
+    context = "\n\n".join([f"Context {i+1} (Score: {scores[i]:.4f}):\n{chunk}" for i, chunk in enumerate(chunks)])
 
-Context:
+    # Build prompt with conversation history
+    if conversation_context:
+        prompt = f"""{system_prompt}
+
+Previous Conversation:
+{conversation_context}
+
+Retrieved Context from Documents:
 {context}
 
-User Question: {user_query}
+Current Question: {user_query}
 
 Answer:"""
-    return prompt, chunks, metadatas
+    else:
+        prompt = f"""{system_prompt}
 
-def generate_answer_gemini(user_query):
-    prompt, chunks, metadatas = rag_pipeline(user_query)
+Retrieved Context from Documents:
+{context}
+
+Question: {user_query}
+
+Answer:"""
+    return prompt, chunks, metadatas, scores
+
+def generate_answer_gemini(user_query, top_k=3):
+    prompt, chunks, metadatas, scores = rag_pipeline(user_query, top_k=top_k)
     response = llm.models.generate_content(
         model="gemini-2.0-flash",
         contents=prompt,
         config={"temperature": 0}
     )
-    return response.text, chunks, metadatas
+    return response.text, chunks, metadatas, scores
+
+# -------------------------------
+# Chat Management Functions
+# -------------------------------
+def add_message_to_history(role, content, retrieved_chunks=None, metadatas=None, scores=None):
+    """Add a message to chat history with metadata"""
+    import datetime
+    message = {
+        "role": role,
+        "content": content,
+        "timestamp": datetime.datetime.now().strftime("%H:%M:%S"),
+        "retrieved_chunks": retrieved_chunks or [],
+        "metadatas": metadatas or [],
+        "scores": scores or []
+    }
+    st.session_state.chat_history.append(message)
+
+def get_recent_conversation(n=3):
+    """Get the last n conversation exchanges for context"""
+    if not st.session_state.chat_history:
+        return ""
+
+    # Get last n*2 messages (n user + n assistant pairs)
+    recent_messages = st.session_state.chat_history[-(n*2):]
+
+    conversation = []
+    for msg in recent_messages:
+        if msg["role"] == "user":
+            conversation.append(f"User: {msg['content']}")
+        else:
+            conversation.append(f"Assistant: {msg['content']}")
+
+    return "\n".join(conversation) if conversation else ""
+
+def display_chat_message(message):
+    """Display a single chat message"""
+    if message["role"] == "user":
+        with st.chat_message("user"):
+            st.write(message["content"])
+            st.caption(f"🕒 {message['timestamp']}")
+    else:  # assistant
+        with st.chat_message("assistant"):
+            st.write(message["content"])
+            st.caption(f"🕒 {message['timestamp']}")
+
+            # Show retrieved context if available
+            if message["retrieved_chunks"]:
+                with st.expander("📖 Retrieved Context", expanded=False):
+                    for i, (chunk, meta, score) in enumerate(zip(
+                        message["retrieved_chunks"],
+                        message["metadatas"],
+                        message["scores"]
+                    )):
+                        filename = meta.get('filename', 'unknown')
+                        st.markdown(f"**Context {i+1} ({filename}, Page {meta['page']}, Score: {score:.4f})**")
+                        st.write(chunk)
+
+# -------------------------------
+# Session State Initialization
+# -------------------------------
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+if "processing" not in st.session_state:
+    st.session_state.processing = False
 
 # -------------------------------
 # Streamlit Interface
@@ -124,6 +209,15 @@ top_k = st.sidebar.slider("Top K (retrieved chunks)", min_value=1, max_value=10,
 # temperature = st.sidebar.slider("LLM Temperature", min_value=0.0, max_value=1.0, value=0, step=0.05)
 # Add reprocess button
 reprocess = st.sidebar.button("🔄 Reprocess PDF")
+
+# Chat management
+st.sidebar.header("💬 Chat Management")
+if st.sidebar.button("🗑️ Clear Chat History"):
+    st.session_state.chat_history = []
+    st.rerun()
+
+if st.session_state.chat_history:
+    st.sidebar.write(f"Messages: {len(st.session_state.chat_history)}")
 
 uploaded_files = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True)
 
@@ -160,60 +254,100 @@ if uploaded_files:
         st.success(f"Stored {len(chunks)} chunks from {len(uploaded_files)} PDF files with chunk_size={chunk_size}, overlap={chunk_overlap}.")
     else:
         st.info("Using existing ChromaDB collection.")
+
     # Chat Interface
-    st.subheader("Ask questions about the documents")
-    query = st.text_input("Your Question")
+    st.subheader("💬 Chat with your documents")
 
-    if query:
-        with st.spinner("Generating answer..."):
-            def search_query(query, n_results=3):
-                query_embedding = model.encode([query])
-                results = collection.query(
-                    query_embeddings=query_embedding.tolist(),
-                    n_results=n_results
-                )
-                return results
+    # Display chat history
+    chat_container = st.container()
+    with chat_container:
+        for message in st.session_state.chat_history:
+            display_chat_message(message)
 
-            def rag_pipeline(user_query, system_prompt=None):
-                if system_prompt is None:
-                    system_prompt = "You are a helpful assistant.Please use context from the PDF to answer questions. If insufficient context, say so."
+    # Chat input
+    if query := st.chat_input("Ask a question about your documents..."):
+        # Add user message to history
+        add_message_to_history("user", query)
 
-                results = search_query(user_query, n_results=top_k)
-                chunks = results["documents"][0]
-                metadatas = results["metadatas"][0]
-                scores = results["distances"][0]  # similarity scores
+        # Display user message immediately
+        with st.chat_message("user"):
+            st.write(query)
+            st.caption(f"🕒 {st.session_state.chat_history[-1]['timestamp']}")
 
-                context = "\n\n".join(
-                    [f"Context {i+1} (Score: {scores[i]:.4f}):\n{chunk}" 
-                     for i, chunk in enumerate(chunks)]
-                )
+        # Generate assistant response
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                def search_query(query, n_results=3):
+                    query_embedding = model.encode([query])
+                    results = collection.query(
+                        query_embeddings=query_embedding.tolist(),
+                        n_results=n_results
+                    )
+                    return results
 
-                prompt = f"""{system_prompt}
+                def rag_pipeline(user_query, system_prompt=None):
+                    if system_prompt is None:
+                        system_prompt = "You are a helpful assistant. Please use context from the PDF to answer questions. If insufficient context, say so."
 
-Context:
+                    results = search_query(user_query, n_results=top_k)
+                    chunks = results["documents"][0]
+                    metadatas = results["metadatas"][0]
+                    scores = results["distances"][0]  # similarity scores
+
+                    # Get recent conversation for context
+                    conversation_context = get_recent_conversation(n=3)
+
+                    # Build retrieved context
+                    context = "\n\n".join(
+                        [f"Context {i+1} (Score: {scores[i]:.4f}):\n{chunk}"
+                         for i, chunk in enumerate(chunks)]
+                    )
+
+                    # Build prompt with conversation history
+                    if conversation_context:
+                        prompt = f"""{system_prompt}
+
+Previous Conversation:
+{conversation_context}
+
+Retrieved Context from Documents:
 {context}
 
-User Question: {user_query}
+Current Question: {user_query}
 
 Answer:"""
-                return prompt, chunks, metadatas, scores
+                    else:
+                        prompt = f"""{system_prompt}
 
-            def generate_answer_gemini(user_query):
-                prompt, chunks, metadatas, scores = rag_pipeline(user_query)
-                response = llm.models.generate_content(
-                    model="gemini-2.0-flash",
-                    contents=prompt,
-                    config={"temperature": 0}
-                )
-                return response.text, chunks, metadatas, scores
+Retrieved Context from Documents:
+{context}
 
-            answer, retrieved_chunks, metadatas, scores = generate_answer_gemini(query)
+Question: {user_query}
 
-        st.markdown("### 🤖 Answer")
-        st.write(answer)
+Answer:"""
+                    return prompt, chunks, metadatas, scores
 
-        with st.expander("📖 Retrieved Context"):
-            for i, (chunk, meta, score) in enumerate(zip(retrieved_chunks, metadatas, scores)):
-                filename = meta.get('filename', 'unknown')
-                st.markdown(f"**Context {i+1} ({filename}, Page {meta['page']}, Score: {score:.4f})**")
-                st.write(chunk)  # show full chunk without truncation
+                def generate_answer_gemini(user_query):
+                    prompt, chunks, metadatas, scores = rag_pipeline(user_query)
+                    response = llm.models.generate_content(
+                        model="gemini-2.0-flash",
+                        contents=prompt,
+                        config={"temperature": 0}
+                    )
+                    return response.text, chunks, metadatas, scores
+
+                answer, retrieved_chunks, metadatas, scores = generate_answer_gemini(query)
+
+            # Display assistant response
+            st.write(answer)
+            st.caption(f"🕒 {datetime.datetime.now().strftime('%H:%M:%S')}")
+
+            # Show retrieved context
+            with st.expander("📖 Retrieved Context", expanded=False):
+                for i, (chunk, meta, score) in enumerate(zip(retrieved_chunks, metadatas, scores)):
+                    filename = meta.get('filename', 'unknown')
+                    st.markdown(f"**Context {i+1} ({filename}, Page {meta['page']}, Score: {score:.4f})**")
+                    st.write(chunk)
+
+            # Add assistant message to history
+            add_message_to_history("assistant", answer, retrieved_chunks, metadatas, scores)
