@@ -21,11 +21,11 @@ collection = client.get_or_create_collection("pdf_collection")
 
 # Initialize embedding model (cached)
 @st.cache_resource
-def load_embedding_model():
-    model_name = 'sentence-transformers/all-MiniLM-L6-v2'
-    return SentenceTransformer(model_name)
-
-model = load_embedding_model()
+def load_embedding_model(model_name):
+    if model_name == 'nomic-ai/nomic-embed-text-v1.5':
+        return SentenceTransformer(model_name, trust_remote_code=True)
+    else:
+        return SentenceTransformer(model_name)
 
 # Initialize Gemini client
 llm = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
@@ -196,6 +196,9 @@ if "chat_history" not in st.session_state:
 if "processing" not in st.session_state:
     st.session_state.processing = False
 
+if "current_embedding_model" not in st.session_state:
+    st.session_state.current_embedding_model = None
+
 # -------------------------------
 # Streamlit Interface
 # -------------------------------
@@ -203,6 +206,18 @@ st.title("📄 RAG PDF Assistant with Gemini + ChromaDB")
 
 # Sidebar for configuration
 st.sidebar.header("⚙️ RAG Settings")
+
+# Embedding model selection
+embedding_model_option = st.sidebar.selectbox(
+    "Embedding Model",
+    ["sentence-transformers/all-MiniLM-L6-v2", "nomic-ai/nomic-embed-text-v1.5"],
+    index=0
+)
+
+# Load the selected embedding model
+model = load_embedding_model(embedding_model_option)
+st.sidebar.info(f"📊 Current model: {embedding_model_option}")
+
 chunk_size = st.sidebar.slider("Chunk Size", min_value=200, max_value=2000, value=1000, step=100)
 chunk_overlap = st.sidebar.slider("Chunk Overlap", min_value=0, max_value=500, value=200, step=50)
 top_k = st.sidebar.slider("Top K (retrieved chunks)", min_value=1, max_value=10, value=3, step=1)
@@ -232,9 +247,17 @@ if uploaded_files:
 
     st.success(f"{len(uploaded_files)} PDF files uploaded successfully!")
 
-    # Check if first upload or reprocess is requested
-    if reprocess or collection.count() == 0:
-        st.info(f"Processing {len(uploaded_files)} PDF files with current chunk settings...")
+    # Check if embedding model has changed
+    model_changed = st.session_state.current_embedding_model != embedding_model_option
+    if model_changed:
+        st.session_state.current_embedding_model = embedding_model_option
+
+    # Check if first upload, reprocess is requested, or model changed
+    if reprocess or collection.count() == 0 or model_changed:
+        if model_changed:
+            st.info(f"Embedding model changed to {embedding_model_option}. Reprocessing {len(uploaded_files)} PDF files...")
+        else:
+            st.info(f"Processing {len(uploaded_files)} PDF files with current settings...")
 
         # Always reset collection when reprocessing
         client.delete_collection("pdf_collection")
@@ -251,7 +274,7 @@ if uploaded_files:
         texts, embeddings = embed_chunks(chunks)
         store_in_chromadb(collection, chunks, embeddings)
 
-        st.success(f"Stored {len(chunks)} chunks from {len(uploaded_files)} PDF files with chunk_size={chunk_size}, overlap={chunk_overlap}.")
+        st.success(f"Stored {len(chunks)} chunks from {len(uploaded_files)} PDF files using {embedding_model_option} with chunk_size={chunk_size}, overlap={chunk_overlap}.")
     else:
         st.info("Using existing ChromaDB collection.")
 
