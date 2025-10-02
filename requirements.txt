@@ -1,9 +1,12 @@
 streamlit
 chromadb
+pandas
+numpy
+faiss-cpu
 langchain-community
 langchain
 sentence-transformers
 cerebras-cloud-sdk
 python-dotenv
-pypdf
-openpyxl
+pdfplumber
+camelot-py
