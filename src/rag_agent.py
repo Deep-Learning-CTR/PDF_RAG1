@@ -389,7 +389,7 @@ if uploaded_files:
 
         with st.spinner("Generating embeddings..."):
             texts, embeddings = embed_chunks(chunks)
-        
+
         with st.spinner(f"Storing in {vector_db_option}..."):
             store_in_chromadb(vector_db, chunks, embeddings)
 
@@ -398,7 +398,8 @@ if uploaded_files:
     else:
         st.info(f"Using existing {vector_db_option} collection with {vector_db.count()} chunks.")
 
-    # Chat Interface
+# Chat Interface - moved outside uploaded_files block
+if vector_db.count() > 0:
     st.subheader("💬 Chat with your documents")
 
     # Display chat history
@@ -432,7 +433,7 @@ if uploaded_files:
                     filename = meta.get('filename', 'unknown')
                     file_type = meta.get('file_type', 'unknown')
                     extraction_method = meta.get('extraction_method', 'N/A')
-                    
+
                     # Display metadata based on file type
                     if file_type == 'pdf':
                         location = f"Page {meta.get('page', 'N/A')}"
@@ -443,9 +444,11 @@ if uploaded_files:
                     else:
                         location = "N/A"
                         method_info = ""
-                    
+
                     st.markdown(f"**Context {i+1} ({filename}, {location}{method_info}, Score: {score:.4f})**")
                     st.text(chunk)
 
             # Add assistant message to history
             add_message_to_history("assistant", answer, retrieved_chunks, metadatas, scores)
+else:
+    st.info("👆 Please upload documents to start chatting")
