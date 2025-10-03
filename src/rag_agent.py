@@ -8,6 +8,7 @@ from langchain.schema import Document
 from sentence_transformers import SentenceTransformer
 from cerebras.cloud.sdk import Cerebras
 from dotenv import load_dotenv
+from groq import Groq
 
 from vector_db import VectorDB, ChromaDBStore, FAISSStore
 from extractors import (
@@ -33,6 +34,9 @@ def load_embedding_model(model_name):
         return SentenceTransformer(model_name)
 
 # Initialize Cerebras client
+llm2=Groq(
+    api_key=os.environ.get("GROQ_API_KEY"),
+)
 llm = Cerebras(api_key=os.environ.get("CEREBRAS_API_KEY"))
 
 def embed_chunks(chunks):
@@ -112,13 +116,22 @@ Question: {user_query}
 Answer:"""
     return prompt, chunks, metadatas, scores
 
-def generate_answer_cerebras(user_query, model_name="llama-4-scout-17b-16e-instruct", top_k=3):
+def generate_answer(user_query, provider="cerebras", model_name="llama-4-scout-17b-16e-instruct", top_k=3):
     prompt, chunks, metadatas, scores = rag_pipeline(user_query, top_k=top_k)
-    response = llm.chat.completions.create(
-        model=model_name,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0
-    )
+
+    if provider.lower() == "cerebras":
+        response = llm.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+    else:  # Groq
+        response = llm2.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+
     return response.choices[0].message.content, chunks, metadatas, scores
 
 # -------------------------------
@@ -247,14 +260,30 @@ embedding_model_option = st.sidebar.selectbox(
 model = load_embedding_model(embedding_model_option)
 st.sidebar.info(f"📊 Current embedding model: {embedding_model_option}")
 
-# LLM model selection
-llm_models = {
-    "Llama 4 Scout (17B)": "llama-4-scout-17b-16e-instruct",
-    "Llama 3.1 8B": "llama3.1-8b",
-    "Llama 3.3 70B": "llama-3.3-70b",
-    "OpenAI GPT OSS (120B)": "gpt-oss-120b",
-    "Qwen 3 32B": "qwen-3-32b"
-}
+# LLM API Provider selection
+llm_provider = st.sidebar.selectbox(
+    "LLM Provider",
+    ["Cerebras", "Groq"],
+    index=0
+)
+
+# LLM model selection based on provider
+if llm_provider == "Cerebras":
+    llm_models = {
+        "Llama 4 Scout (17B)": "llama-4-scout-17b-16e-instruct",
+        "Llama 3.1 8B": "llama3.1-8b",
+        "Llama 3.3 70B": "llama-3.3-70b",
+        "OpenAI GPT OSS (120B)": "gpt-oss-120b",
+        "Qwen 3 32B": "qwen-3-32b"
+    }
+else:  # Groq
+    llm_models = {
+        "Llama 3.3 70B": "llama-3.3-70b-versatile",
+        "Llama 3.1 8B": "llama-3.1-8b-instant",
+        "Llama 3.1 70B": "llama-3.1-70b-versatile",
+        "Mixtral 8x7B": "mixtral-8x7b-32768",
+        "Gemma 2 9B": "gemma2-9b-it"
+    }
 
 llm_model_display = st.sidebar.selectbox(
     "LLM Model",
@@ -262,7 +291,7 @@ llm_model_display = st.sidebar.selectbox(
     index=0
 )
 llm_model_option = llm_models[llm_model_display]
-st.sidebar.info(f"🤖 Current LLM: {llm_model_display}")
+st.sidebar.info(f"🤖 Provider: {llm_provider} | Model: {llm_model_display}")
 
 chunk_size = st.sidebar.slider("Chunk Size", min_value=200, max_value=2000, value=1000, step=100)
 chunk_overlap = st.sidebar.slider("Chunk Overlap", min_value=0, max_value=500, value=200, step=50)
@@ -391,7 +420,7 @@ if uploaded_files:
         # Generate assistant response
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                answer, retrieved_chunks, metadatas, scores = generate_answer_cerebras(query, llm_model_option)
+                answer, retrieved_chunks, metadatas, scores = generate_answer(query, llm_provider, llm_model_option, top_k)
 
             # Display assistant response
             st.write(answer)

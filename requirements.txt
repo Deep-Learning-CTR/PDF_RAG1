@@ -10,3 +10,5 @@ cerebras-cloud-sdk
 python-dotenv
 pdfplumber
 camelot-py
+groq
+openpyxl
