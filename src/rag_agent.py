@@ -44,7 +44,7 @@ def embed_chunks(chunks):
     embeddings = model.encode(texts)
     return texts, embeddings
 
-def store_in_chromadb(collection, chunks, embeddings):
+def store_in_vector_db(vector_db, chunks, embeddings):
     texts = [chunk.page_content for chunk in chunks]
     ids = [f"chunk_{i}" for i in range(len(chunks))]
     metadatas = [
@@ -59,7 +59,7 @@ def store_in_chromadb(collection, chunks, embeddings):
         }
         for i, chunk in enumerate(chunks)
     ]
-    collection.add(
+    vector_db.add(
         embeddings=embeddings.tolist(),
         documents=texts,
         metadatas=metadatas,
@@ -390,7 +390,7 @@ if uploaded_files:
             texts, embeddings = embed_chunks(chunks)
 
         with st.spinner(f"Storing in {vector_db_option}..."):
-            store_in_chromadb(vector_db, chunks, embeddings)
+            store_in_vector_db(vector_db, chunks, embeddings)
 
         st.success(f"✅ Stored {len(chunks)} chunks from {len(documents)} pages/sheets across {len(uploaded_files)} file(s) in {vector_db_option}")
         st.info(f"Using {embedding_model_option} | chunk_size={chunk_size} | overlap={chunk_overlap}")
