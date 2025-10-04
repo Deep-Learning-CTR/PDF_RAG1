@@ -357,7 +357,7 @@ with st.sidebar.expander("ℹ️ Vector Database Info"):
                     else:
                         st.error("Failed to load index")
 
-uploaded_files = st.file_uploader("Upload PDF or Excel files", type=["pdf", "xlsx", "xls"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload PDF or Excel files", type=["pdf", "xlsx", "xls","csv"], accept_multiple_files=True)
 
 if uploaded_files:
     # Save all uploaded files
