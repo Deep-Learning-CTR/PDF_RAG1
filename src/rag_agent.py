@@ -221,6 +221,12 @@ if "current_vector_db" not in st.session_state:
 if "vector_db_instance" not in st.session_state:
     st.session_state.vector_db_instance = None
 
+if "system_notifications" not in st.session_state:
+    st.session_state.system_notifications = {
+        "upload_info": None,
+        "db_info": None
+    }
+
 # -------------------------------
 # Streamlit Interface
 # -------------------------------
@@ -363,7 +369,8 @@ if uploaded_files:
             f.write(uploaded_file.read())
         file_paths.append(file_path)
 
-    st.success(f"{len(uploaded_files)} file(s) uploaded successfully!")
+    # Store upload info in session state
+    st.session_state.system_notifications["upload_info"] = f"{len(uploaded_files)} file(s) uploaded successfully!"
 
     # Check if embedding model has changed
     model_changed = st.session_state.current_embedding_model != embedding_model_option
@@ -392,10 +399,17 @@ if uploaded_files:
         with st.spinner(f"Storing in {vector_db_option}..."):
             store_in_vector_db(vector_db, chunks, embeddings)
 
-        st.success(f"✅ Stored {len(chunks)} chunks from {len(documents)} pages/sheets across {len(uploaded_files)} file(s) in {vector_db_option}")
-        st.info(f"Using {embedding_model_option} | chunk_size={chunk_size} | overlap={chunk_overlap}")
+        success_msg = f"✅ Stored {len(chunks)} chunks from {len(documents)} pages/sheets across {len(uploaded_files)} file(s) in {vector_db_option}"
+        st.session_state.system_notifications["db_info"] = success_msg
     else:
-        st.info(f"Using existing {vector_db_option} collection with {vector_db.count()} chunks.")
+        db_info_msg = f"Using existing {vector_db_option} collection with {vector_db.count()} chunks."
+        st.session_state.system_notifications["db_info"] = db_info_msg
+
+# Display persistent system notifications (above chat interface)
+if st.session_state.system_notifications["upload_info"]:
+    st.success(st.session_state.system_notifications["upload_info"])
+if st.session_state.system_notifications["db_info"]:
+    st.info(st.session_state.system_notifications["db_info"])
 
 # Chat Interface - moved outside uploaded_files block
 if vector_db.count() > 0:
