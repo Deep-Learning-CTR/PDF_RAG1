@@ -9,6 +9,7 @@ from sentence_transformers import SentenceTransformer
 from cerebras.cloud.sdk import Cerebras
 from dotenv import load_dotenv
 from groq import Groq
+from langchain_community.llms import Ollama
 
 from vector_db import VectorDB, ChromaDBStore, FAISSStore
 from extractors import (
@@ -33,11 +34,12 @@ def load_embedding_model(model_name):
     else:
         return SentenceTransformer(model_name)
 
-# Initialize Cerebras client
+# Initialize LLM clients
 llm2=Groq(
     api_key=os.environ.get("GROQ_API_KEY"),
 )
 llm = Cerebras(api_key=os.environ.get("CEREBRAS_API_KEY"))
+llm3 = Ollama(model="phi3")
 
 def embed_chunks(chunks):
     texts = [chunk.page_content for chunk in chunks]
@@ -125,14 +127,18 @@ def generate_answer(user_query, provider="cerebras", model_name="llama-4-scout-1
             messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
-    else:  # Groq
+        answer = response.choices[0].message.content
+    elif provider.lower() == "groq":
         response = llm2.chat.completions.create(
             model=model_name,
             messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
+        answer = response.choices[0].message.content
+    else:  # Ollama
+        answer = llm3.invoke(prompt)
 
-    return response.choices[0].message.content, chunks, metadatas, scores
+    return answer, chunks, metadatas, scores
 
 # -------------------------------
 # Chat Management Functions
@@ -269,7 +275,7 @@ st.sidebar.info(f"📊 Current embedding model: {embedding_model_option}")
 # LLM API Provider selection
 llm_provider = st.sidebar.selectbox(
     "LLM Provider",
-    ["Cerebras", "Groq"],
+    ["Cerebras", "Groq", "Ollama"],
     index=0
 )
 
@@ -282,12 +288,16 @@ if llm_provider == "Cerebras":
         "OpenAI GPT OSS (120B)": "gpt-oss-120b",
         "Qwen 3 32B": "qwen-3-32b"
     }
-else:  # Groq
+elif llm_provider == "Groq":
     llm_models = {
         "Llama 3.3 70B": "llama-3.3-70b-versatile",
         "Llama 3.1 8B": "llama-3.1-8b-instant",
         "Llama 3.1 70B": "llama-3.1-70b-versatile",
         "Gemma 2 9B": "gemma2-9b-it"
+    }
+else:  # Ollama
+    llm_models = {
+        "Phi-3": "phi3"
     }
 
 llm_model_display = st.sidebar.selectbox(
