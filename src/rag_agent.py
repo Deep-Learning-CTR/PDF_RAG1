@@ -2,6 +2,7 @@ import streamlit as st
 import os
 import datetime
 import pandas as pd
+import time
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
@@ -9,7 +10,7 @@ from sentence_transformers import SentenceTransformer
 from cerebras.cloud.sdk import Cerebras
 from dotenv import load_dotenv
 from groq import Groq
-from langchain_community.llms import Ollama
+from langchain_ollama import OllamaLLM as Ollama
 
 from vector_db import VectorDB, ChromaDBStore, FAISSStore
 from extractors import (
@@ -39,7 +40,7 @@ llm2=Groq(
     api_key=os.environ.get("GROQ_API_KEY"),
 )
 llm = Cerebras(api_key=os.environ.get("CEREBRAS_API_KEY"))
-llm3 = Ollama(model="phi3")
+llm3 = Ollama(model="phi3:latest")
 
 def embed_chunks(chunks):
     texts = [chunk.page_content for chunk in chunks]
@@ -136,6 +137,8 @@ def generate_answer(user_query, provider="cerebras", model_name="llama-4-scout-1
         )
         answer = response.choices[0].message.content
     else:  # Ollama
+        llm3.model = model_name
+        llm3.temperature = 0
         answer = llm3.invoke(prompt)
 
     return answer, chunks, metadatas, scores
@@ -143,7 +146,7 @@ def generate_answer(user_query, provider="cerebras", model_name="llama-4-scout-1
 # -------------------------------
 # Chat Management Functions
 # -------------------------------
-def add_message_to_history(role, content, retrieved_chunks=None, metadatas=None, scores=None):
+def add_message_to_history(role, content, retrieved_chunks=None, metadatas=None, scores=None, response_time=None):
     """Add a message to chat history with metadata"""
     message = {
         "role": role,
@@ -151,7 +154,8 @@ def add_message_to_history(role, content, retrieved_chunks=None, metadatas=None,
         "timestamp": datetime.datetime.now().strftime("%H:%M:%S"),
         "retrieved_chunks": retrieved_chunks or [],
         "metadatas": metadatas or [],
-        "scores": scores or []
+        "scores": scores or [],
+        "response_time": response_time
     }
     st.session_state.chat_history.append(message)
 
@@ -181,7 +185,11 @@ def display_chat_message(message):
     else:  # assistant
         with st.chat_message("assistant"):
             st.write(message["content"])
-            st.caption(f"🕒 {message['timestamp']}")
+            # Show timestamp and response time if available
+            if message.get("response_time"):
+                st.caption(f"🕒 {message['timestamp']} | ⏱️ Response time: {message['response_time']:.2f}s")
+            else:
+                st.caption(f"🕒 {message['timestamp']}")
 
             # Show retrieved context if available
             if message["retrieved_chunks"]:
@@ -265,7 +273,7 @@ st.sidebar.info(f"🗄️ Current Vector DB: {vector_db_option}")
 embedding_model_option = st.sidebar.selectbox(
     "Embedding Model",
     ["sentence-transformers/all-MiniLM-L6-v2", "nomic-ai/nomic-embed-text-v1.5"],
-    index=0
+    index=1
 )
 
 # Load the selected embedding model
@@ -297,7 +305,11 @@ elif llm_provider == "Groq":
     }
 else:  # Ollama
     llm_models = {
-        "Phi-3": "phi3"
+        "Phi-3": "phi3:latest",
+        "GPT-OSS 20B": "gpt-oss:20b",
+        "DeepSeek R1 8B": "deepseek-r1:8b",
+        "Qwen 3 8B": "qwen3:8b",
+        "Gemma 3 12B": "gemma3:12b"
     }
 
 llm_model_display = st.sidebar.selectbox(
@@ -444,11 +456,13 @@ if vector_db.count() > 0:
         # Generate assistant response
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
+                start_time = time.time()
                 answer, retrieved_chunks, metadatas, scores = generate_answer(query, llm_provider, llm_model_option, top_k)
+                response_time = time.time() - start_time
 
             # Display assistant response
             st.write(answer)
-            st.caption(f"🕒 {datetime.datetime.now().strftime('%H:%M:%S')}")
+            st.caption(f"🕒 {datetime.datetime.now().strftime('%H:%M:%S')} | ⏱️ Response time: {response_time:.2f}s")
 
             # Show retrieved context
             with st.expander("📖 Retrieved Context", expanded=False):
@@ -472,6 +486,6 @@ if vector_db.count() > 0:
                     st.text(chunk)
 
             # Add assistant message to history
-            add_message_to_history("assistant", answer, retrieved_chunks, metadatas, scores)
+            add_message_to_history("assistant", answer, retrieved_chunks, metadatas, scores, response_time)
 else:
     st.info("👆 Please upload documents to start chatting")
