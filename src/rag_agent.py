@@ -258,13 +258,14 @@ vector_db_option = st.sidebar.selectbox(
     index=0
 )
 
-# Initialize or switch vector database
-if st.session_state.current_vector_db != vector_db_option:
+# Initialize or switch vector database (persistent across reruns)
+if "vector_db_instance" not in st.session_state or st.session_state.current_vector_db != vector_db_option:
     st.session_state.current_vector_db = vector_db_option
     if vector_db_option == "ChromaDB":
         st.session_state.vector_db_instance = ChromaDBStore()
     else:
         st.session_state.vector_db_instance = FAISSStore()
+    st.session_state.docs_embedded = False  # force re-embed on DB switch
     st.sidebar.success(f"Switched to {vector_db_option}")
 
 vector_db = st.session_state.vector_db_instance
@@ -337,6 +338,9 @@ if st.sidebar.button("🗑️ Clear Chat History"):
     st.session_state.chat_history = []
     st.rerun()
 
+if "docs_embedded" not in st.session_state:
+    st.session_state.docs_embedded = False
+
 if st.session_state.chat_history:
     st.sidebar.write(f"Messages: {len(st.session_state.chat_history)}")
 
@@ -396,11 +400,10 @@ uploaded_files = st.file_uploader(
     type=["pdf", "xlsx", "xls", "csv", "png", "jpg", "jpeg", "webp"],
     accept_multiple_files=True
 )
-if uploaded_files:
-    st.info(f"💡 Images will be analyzed using Vision AI. PDFs may contain images that will also be analyzed.")
 
-# Process uploaded files (documents and images)
 if uploaded_files:
+    st.info("💡 Images will be analyzed using Vision AI. PDFs may contain images that will also be analyzed.")
+
     # Separate files into documents and images
     doc_files = []
     image_files = []
@@ -420,67 +423,88 @@ if uploaded_files:
         upload_info_parts.append(f"{len(image_files)} image(s)")
     st.session_state.system_notifications["upload_info"] = f"{' + '.join(upload_info_parts)} uploaded successfully!"
 
-    # Check if embedding model has changed
+    # Check if model changed since last run
     model_changed = st.session_state.current_embedding_model != embedding_model_option
     if model_changed:
         st.session_state.current_embedding_model = embedding_model_option
 
-    # Check if first upload, reprocess is requested, or model changed
-    should_reset = reprocess or vector_db.count() == 0 or model_changed
+    # Determine whether to reprocess
+    should_reset = (
+        reprocess
+        or vector_db.count() == 0
+        or model_changed
+        or not st.session_state.docs_embedded
+    )
 
     if should_reset:
         if model_changed:
             st.info(f"Embedding model changed to {embedding_model_option}. Reprocessing all files...")
+        elif reprocess:
+            st.info("🔄 Reprocessing all documents as requested...")
+        elif vector_db.count() == 0:
+            st.info("Processing new documents...")
         else:
-            st.info(f"Processing {len(uploaded_files)} file(s)...")
+            st.info("Processing uploaded documents for the first time...")
+
+        # Reset DB and mark as not embedded
         vector_db.reset()
+        st.session_state.docs_embedded = False
+
+        all_documents = []
+
+        # -------------------------------
+        # Process document files (PDF, Excel)
+        # -------------------------------
+        if doc_files:
+            file_paths = []
+            for i, uploaded_file in enumerate(doc_files):
+                file_path = os.path.join(f"temp_{i}_{uploaded_file.name}")
+                with open(file_path, "wb") as f:
+                    f.write(uploaded_file.read())
+                file_paths.append(file_path)
+
+            with st.spinner("Extracting text, tables, and images from documents..."):
+                documents = extract_text_from_multiple_files(file_paths, use_vision)
+                all_documents.extend(documents)
+
+        # -------------------------------
+        # Process standalone image files
+        # -------------------------------
+        if image_files:
+            image_paths = []
+            for i, uploaded_image in enumerate(image_files):
+                image_path = os.path.join(f"temp_img_{i}_{uploaded_image.name}")
+                with open(image_path, "wb") as f:
+                    f.write(uploaded_image.read())
+                image_paths.append(image_path)
+
+            with st.spinner("Analyzing images with vision model..."):
+                for img_path in image_paths:
+                    docs = extract_from_standalone_image(img_path)
+                    all_documents.extend(docs)
+
+        # -------------------------------
+        # Chunk, embed, and store
+        # -------------------------------
+        if all_documents:
+            with st.spinner("Chunking documents..."):
+                chunks = split_chunk_overlap(all_documents, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+
+            with st.spinner("Generating embeddings..."):
+                texts, embeddings = embed_chunks(chunks)
+
+            with st.spinner(f"Storing in {vector_db_option}..."):
+                store_in_vector_db(vector_db, chunks, embeddings)
+
+            success_msg = f"✅ Stored {len(chunks)} chunks from {len(all_documents)} items in {vector_db_option}"
+            st.session_state.system_notifications["db_info"] = success_msg
+            st.session_state.docs_embedded = True  # ✅ mark as processed
+            st.success(success_msg)
+        else:
+            st.warning("No content could be extracted from the uploaded files.")
+
     else:
-        st.info(f"Adding {len(uploaded_files)} new file(s) to existing collection...")
-
-    all_documents = []
-
-    # Process document files (PDF, Excel)
-    if doc_files:
-        file_paths = []
-        for i, uploaded_file in enumerate(doc_files):
-            file_path = os.path.join(f"temp_{i}_{uploaded_file.name}")
-            with open(file_path, "wb") as f:
-                f.write(uploaded_file.read())
-            file_paths.append(file_path)
-
-        with st.spinner("Extracting text, tables, and images from documents..."):
-            documents = extract_text_from_multiple_files(file_paths, use_vision)
-            all_documents.extend(documents)
-
-    # Process standalone image files
-    if image_files:
-        image_paths = []
-        for i, uploaded_image in enumerate(image_files):
-            image_path = os.path.join(f"temp_img_{i}_{uploaded_image.name}")
-            with open(image_path, "wb") as f:
-                f.write(uploaded_image.read())
-            image_paths.append(image_path)
-
-        with st.spinner("Analyzing images with vision model..."):
-            for img_path in image_paths:
-                docs = extract_from_standalone_image(img_path)
-                all_documents.extend(docs)
-
-    # Process all documents together
-    if all_documents:
-        with st.spinner("Chunking documents..."):
-            chunks = split_chunk_overlap(all_documents, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-
-        with st.spinner("Generating embeddings..."):
-            texts, embeddings = embed_chunks(chunks)
-
-        with st.spinner(f"Storing in {vector_db_option}..."):
-            store_in_vector_db(vector_db, chunks, embeddings)
-
-        success_msg = f"✅ Stored {len(chunks)} chunks from {len(all_documents)} items in {vector_db_option}"
-        st.session_state.system_notifications["db_info"] = success_msg
-    else:
-        st.warning("No content could be extracted from the uploaded files.")
+        st.info("✅ Documents already embedded. Ready for chatting!")
 
 # Display persistent system notifications (above chat interface)
 if st.session_state.system_notifications["upload_info"]:

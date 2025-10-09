@@ -20,7 +20,7 @@ warnings.filterwarnings('ignore', message='.*is image-based, camelot only works 
 
 # Set Tesseract path for Windows (adjust if installed elsewhere)
 if os.name == 'nt':  # Windows
-    tesseract_path = r'C:\Users\charb\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'
+    tesseract_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
     if os.path.exists(tesseract_path):
         pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
