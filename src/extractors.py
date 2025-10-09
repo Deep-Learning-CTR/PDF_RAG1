@@ -191,7 +191,7 @@ def extract_text_from_pdf_advanced(pdf_path, use_vision=True):
 
 
 def extract_text_from_excel(excel_path):
-    """Extract text from Excel file and convert to Document objects"""
+    """Extract text from an Excel file — row-by-row only (optimized for RAG embeddings)."""
     documents = []
     filename = os.path.basename(excel_path)
     excel_file = pd.ExcelFile(excel_path)
@@ -199,14 +199,21 @@ def extract_text_from_excel(excel_path):
     for sheet_name in excel_file.sheet_names:
         df = pd.read_excel(excel_path, sheet_name=sheet_name)
 
-        text_content = f"[EXCEL SHEET: {sheet_name}]\n\n"
-        text_content += f"Columns: {', '.join(df.columns.tolist())}\n"
+        # Build text content for this sheet
+        text_content = f"[EXCEL SHEET: {sheet_name}]\n"
+        text_content += f"Columns: {', '.join(df.columns.astype(str).tolist())}\n"
         text_content += f"Total Rows: {len(df)}\n\n"
-        text_content += "[TABLE]\n" + df.to_string(index=True) + "\n[END TABLE]\n\n"
         text_content += "[ROW-BY-ROW DATA]\n"
+
         for idx, row in df.iterrows():
-            row_text = " | ".join([f"{col}: {row[col]}" for col in df.columns if pd.notna(row[col])])
+            row_text_parts = []
+            for col in df.columns:
+                value = row[col]
+                if pd.notna(value):
+                    row_text_parts.append(f"{col}: {value}")
+            row_text = " | ".join(row_text_parts)
             text_content += f"Row {idx + 1}: {row_text}\n"
+
         text_content += "[END ROW-BY-ROW DATA]\n"
 
         doc = Document(

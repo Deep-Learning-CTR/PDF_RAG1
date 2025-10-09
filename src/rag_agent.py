@@ -78,6 +78,47 @@ def search_query(query, n_results=3):
     )
     return results
 
+def decompose_query(user_query, provider="cerebras", model_name="llama-4-scout-17b-16e-instruct"):
+    """Use LLM to break a complex query into atomic sub-queries"""
+    prompt = f"""
+You are a helpful assistant that splits complex or multi-part user questions
+into simple, independent sub-questions suitable for document retrieval.
+
+Example:
+User: What are the revenue figures for 2023, and who were the top 3 customers?
+Sub-questions:
+1. What are the revenue figures for 2023?
+2. Who were the top 3 customers?
+
+Return only the subquestions nothing else.
+User question: {user_query}
+Sub-questions:
+"""
+
+    if provider.lower() == "cerebras":
+        response = llm.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        text = response.choices[0].message.content
+    elif provider.lower() == "groq":
+        response = llm2.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        text = response.choices[0].message.content
+    else:
+        llm3.model = model_name
+        llm3.temperature = 0
+        text = llm3.invoke(prompt)
+
+    # Extract numbered list or split lines
+    subqueries = [q.strip(" -•1234567890.").strip() for q in text.splitlines() if q.strip()]
+    subqueries = [q for q in subqueries if len(q.split()) > 2]  # filter out junk
+    return subqueries if subqueries else [user_query]
+
 def rag_pipeline(user_query, system_prompt=None, top_k=3):
     if system_prompt is None:
         system_prompt = """You are a helpful assistant. Please use context from the documents to answer questions. 
@@ -121,28 +162,68 @@ Answer:"""
     return prompt, chunks, metadatas, scores
 
 def generate_answer(user_query, provider="cerebras", model_name="llama-4-scout-17b-16e-instruct", top_k=3):
-    prompt, chunks, metadatas, scores = rag_pipeline(user_query, top_k=top_k)
+    # Step 1: Decompose complex query
+    subqueries = decompose_query(user_query, provider, model_name)
 
+    st.write(f"🧩 Split into {len(subqueries)} sub-queries:")
+    for sq in subqueries:
+        st.markdown(f"- {sq}")
+
+    all_contexts = []
+    all_chunks, all_metas, all_scores = [], [], []
+
+    # Step 2: For each subquery, retrieve context
+    for sq in subqueries:
+        results = search_query(sq, n_results=top_k)
+        chunks = results["documents"][0]
+        metadatas = results["metadatas"][0]
+        scores = results["distances"][0]
+
+        # Store for final context
+        for i, chunk in enumerate(chunks):
+            all_contexts.append(f"Subquery: {sq}\nContext {i+1} (Score: {scores[i]:.4f}):\n{chunk}")
+        all_chunks.extend(chunks)
+        all_metas.extend(metadatas)
+        all_scores.extend(scores)
+
+    # Step 3: Build combined final prompt
+    system_prompt = """You are a helpful assistant using retrieved document contexts to answer user questions accurately.
+Each section corresponds to one sub-question from the user. Synthesize all information into a coherent, well-structured final answer."""
+
+    combined_context = "\n\n".join(all_contexts)
+
+    final_prompt = f"""{system_prompt}
+
+Retrieved Contexts:
+{combined_context}
+
+Original User Question: {user_query}
+
+Final Answer:
+"""
+
+    # Step 4: Ask final LLM to synthesize answer
     if provider.lower() == "cerebras":
         response = llm.chat.completions.create(
             model=model_name,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": final_prompt}],
             temperature=0
         )
         answer = response.choices[0].message.content
     elif provider.lower() == "groq":
         response = llm2.chat.completions.create(
             model=model_name,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": final_prompt}],
             temperature=0
         )
         answer = response.choices[0].message.content
-    else:  # Ollama
+    else:
         llm3.model = model_name
         llm3.temperature = 0
-        answer = llm3.invoke(prompt)
+        answer = llm3.invoke(final_prompt)
 
-    return answer, chunks, metadatas, scores
+    return answer, all_chunks, all_metas, all_scores
+
 
 # -------------------------------
 # Chat Management Functions
