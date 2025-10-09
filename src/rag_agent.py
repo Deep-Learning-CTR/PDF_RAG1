@@ -17,6 +17,7 @@ from extractors import (
     extract_text_from_multiple_files,
     extract_text_from_pdf_advanced,
     extract_text_from_excel,
+    extract_from_standalone_image,
     split_chunk_overlap
 )
 
@@ -324,6 +325,9 @@ chunk_size = st.sidebar.slider("Chunk Size", min_value=200, max_value=2000, valu
 chunk_overlap = st.sidebar.slider("Chunk Overlap", min_value=0, max_value=500, value=200, step=50)
 top_k = st.sidebar.slider("Top K (retrieved chunks)", min_value=1, max_value=10, value=3, step=1)
 
+# Vision model toggle
+use_vision = st.sidebar.checkbox("Use Vision Model for Images (Groq)", value=True, help="Extract context from non-text images using Groq's vision model")
+
 # Add reprocess button
 reprocess = st.sidebar.button("🔄 Reprocess Documents")
 
@@ -341,11 +345,18 @@ with st.sidebar.expander("ℹ️ PDF Processing Info"):
     st.write("""
     **Advanced PDF Features:**
     - Table extraction using Camelot & PDFPlumber
+    - OCR for text extraction from images
+    - Vision AI for non-text image understanding
     - Layout preservation
     - Complex structure handling
     - Automatic fallback mechanisms
-    
-    Tables are marked with [TABLE] tags for better LLM understanding.
+
+    **Image Processing:**
+    - First tries OCR to extract text from images
+    - If no text found, uses Groq vision model to describe image content
+    - Supports charts, diagrams, photos, and visual elements
+
+    Tables are marked with [TABLE] tags, images with [IMAGE DESCRIPTION] tags.
     """)
 
 with st.sidebar.expander("ℹ️ Vector Database Info"):
@@ -379,20 +390,35 @@ with st.sidebar.expander("ℹ️ Vector Database Info"):
                     else:
                         st.error("Failed to load index")
 
-uploaded_files = st.file_uploader("Upload PDF or Excel files", type=["pdf", "xlsx", "xls","csv"], accept_multiple_files=True)
-
+# File uploader - accepts documents and images
+uploaded_files = st.file_uploader(
+    "Upload documents and images",
+    type=["pdf", "xlsx", "xls", "csv", "png", "jpg", "jpeg", "webp"],
+    accept_multiple_files=True
+)
 if uploaded_files:
-    # Save all uploaded files
-    file_paths = []
-    for i, uploaded_file in enumerate(uploaded_files):
-        file_ext = os.path.splitext(uploaded_file.name)[1]
-        file_path = os.path.join(f"temp_{i}_{uploaded_file.name}")
-        with open(file_path, "wb") as f:
-            f.write(uploaded_file.read())
-        file_paths.append(file_path)
+    st.info(f"💡 Images will be analyzed using Vision AI. PDFs may contain images that will also be analyzed.")
 
-    # Store upload info in session state
-    st.session_state.system_notifications["upload_info"] = f"{len(uploaded_files)} file(s) uploaded successfully!"
+# Process uploaded files (documents and images)
+if uploaded_files:
+    # Separate files into documents and images
+    doc_files = []
+    image_files = []
+
+    for uploaded_file in uploaded_files:
+        file_ext = os.path.splitext(uploaded_file.name)[1].lower()
+        if file_ext in ['.png', '.jpg', '.jpeg', '.webp']:
+            image_files.append(uploaded_file)
+        else:
+            doc_files.append(uploaded_file)
+
+    # Store upload info
+    upload_info_parts = []
+    if doc_files:
+        upload_info_parts.append(f"{len(doc_files)} document(s)")
+    if image_files:
+        upload_info_parts.append(f"{len(image_files)} image(s)")
+    st.session_state.system_notifications["upload_info"] = f"{' + '.join(upload_info_parts)} uploaded successfully!"
 
     # Check if embedding model has changed
     model_changed = st.session_state.current_embedding_model != embedding_model_option
@@ -400,20 +426,50 @@ if uploaded_files:
         st.session_state.current_embedding_model = embedding_model_option
 
     # Check if first upload, reprocess is requested, or model changed
-    if reprocess or vector_db.count() == 0 or model_changed:
+    should_reset = reprocess or vector_db.count() == 0 or model_changed
+
+    if should_reset:
         if model_changed:
-            st.info(f"Embedding model changed to {embedding_model_option}. Reprocessing {len(uploaded_files)} file(s)...")
+            st.info(f"Embedding model changed to {embedding_model_option}. Reprocessing all files...")
         else:
-            st.info(f"Processing {len(uploaded_files)} file(s) with advanced extraction...")
-
-        # Always reset collection when reprocessing
+            st.info(f"Processing {len(uploaded_files)} file(s)...")
         vector_db.reset()
+    else:
+        st.info(f"Adding {len(uploaded_files)} new file(s) to existing collection...")
 
-        with st.spinner("Extracting text and tables from documents..."):
-            documents = extract_text_from_multiple_files(file_paths)
+    all_documents = []
 
+    # Process document files (PDF, Excel)
+    if doc_files:
+        file_paths = []
+        for i, uploaded_file in enumerate(doc_files):
+            file_path = os.path.join(f"temp_{i}_{uploaded_file.name}")
+            with open(file_path, "wb") as f:
+                f.write(uploaded_file.read())
+            file_paths.append(file_path)
+
+        with st.spinner("Extracting text, tables, and images from documents..."):
+            documents = extract_text_from_multiple_files(file_paths, use_vision)
+            all_documents.extend(documents)
+
+    # Process standalone image files
+    if image_files:
+        image_paths = []
+        for i, uploaded_image in enumerate(image_files):
+            image_path = os.path.join(f"temp_img_{i}_{uploaded_image.name}")
+            with open(image_path, "wb") as f:
+                f.write(uploaded_image.read())
+            image_paths.append(image_path)
+
+        with st.spinner("Analyzing images with vision model..."):
+            for img_path in image_paths:
+                docs = extract_from_standalone_image(img_path)
+                all_documents.extend(docs)
+
+    # Process all documents together
+    if all_documents:
         with st.spinner("Chunking documents..."):
-            chunks = split_chunk_overlap(documents, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+            chunks = split_chunk_overlap(all_documents, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
         with st.spinner("Generating embeddings..."):
             texts, embeddings = embed_chunks(chunks)
@@ -421,11 +477,10 @@ if uploaded_files:
         with st.spinner(f"Storing in {vector_db_option}..."):
             store_in_vector_db(vector_db, chunks, embeddings)
 
-        success_msg = f"✅ Stored {len(chunks)} chunks from {len(documents)} pages/sheets across {len(uploaded_files)} file(s) in {vector_db_option}"
+        success_msg = f"✅ Stored {len(chunks)} chunks from {len(all_documents)} items in {vector_db_option}"
         st.session_state.system_notifications["db_info"] = success_msg
     else:
-        db_info_msg = f"Using existing {vector_db_option} collection with {vector_db.count()} chunks."
-        st.session_state.system_notifications["db_info"] = db_info_msg
+        st.warning("No content could be extracted from the uploaded files.")
 
 # Display persistent system notifications (above chat interface)
 if st.session_state.system_notifications["upload_info"]:
