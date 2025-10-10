@@ -11,6 +11,8 @@ from cerebras.cloud.sdk import Cerebras
 from dotenv import load_dotenv
 from groq import Groq
 from langchain_ollama import OllamaLLM as Ollama
+import cohere
+import numpy as np
 
 from vector_db import VectorDB, ChromaDBStore, FAISSStore
 from extractors import (
@@ -31,7 +33,10 @@ st.set_page_config(page_title="RAG Document Assistant", layout="wide")
 # Initialize embedding model (cached)
 @st.cache_resource
 def load_embedding_model(model_name):
-    if model_name == 'nomic-ai/nomic-embed-text-v1.5':
+    if model_name.startswith("cohere/"):
+        # Return None for Cohere models - we'll use API directly
+        return None
+    elif model_name == 'nomic-ai/nomic-embed-text-v1.5':
         return SentenceTransformer(model_name, trust_remote_code=True)
     else:
         return SentenceTransformer(model_name)
@@ -43,9 +48,38 @@ llm2=Groq(
 llm = Cerebras(api_key=os.environ.get("CEREBRAS_API_KEY"))
 llm3 = Ollama(model="phi3:latest")
 
-def embed_chunks(chunks):
+# Initialize Cohere client
+cohere_client = cohere.Client(api_key=os.environ.get("COHERE_API_KEY"))
+
+def embed_chunks(chunks, embedding_model_name):
+    """Embed chunks using either SentenceTransformer or Cohere API"""
     texts = [chunk.page_content for chunk in chunks]
-    embeddings = model.encode(texts)
+
+    if embedding_model_name.startswith("cohere/"):
+        # Use Cohere API for embeddings
+        cohere_model = embedding_model_name.split("/")[1]
+        try:
+            # Cohere has a limit of 96 texts per request
+            batch_size = 96
+            all_embeddings = []
+
+            for i in range(0, len(texts), batch_size):
+                batch = texts[i:i + batch_size]
+                response = cohere_client.embed(
+                    texts=batch,
+                    model=cohere_model,
+                    input_type="search_document"  # For documents to be searched
+                )
+                all_embeddings.extend(response.embeddings)
+
+            embeddings = np.array(all_embeddings)
+        except Exception as e:
+            st.error(f"Error generating Cohere embeddings: {e}")
+            raise
+    else:
+        # Use SentenceTransformer for local embeddings
+        embeddings = model.encode(texts)
+
     return texts, embeddings
 
 def store_in_vector_db(vector_db, chunks, embeddings):
@@ -70,8 +104,25 @@ def store_in_vector_db(vector_db, chunks, embeddings):
         ids=ids
     )
 
-def search_query(query, n_results=3):
-    query_embedding = model.encode([query])
+def search_query(query, n_results=3, embedding_model_name=None):
+    """Search for relevant chunks using query embeddings"""
+    if embedding_model_name and embedding_model_name.startswith("cohere/"):
+        # Use Cohere API for query embedding
+        cohere_model = embedding_model_name.split("/")[1]
+        try:
+            response = cohere_client.embed(
+                texts=[query],
+                model=cohere_model,
+                input_type="search_query"  # For queries to search with
+            )
+            query_embedding = np.array(response.embeddings)
+        except Exception as e:
+            st.error(f"Error generating Cohere query embedding: {e}")
+            raise
+    else:
+        # Use SentenceTransformer for local embeddings
+        query_embedding = model.encode([query])
+
     results = vector_db.query(
         query_embeddings=query_embedding.tolist(),
         n_results=n_results
@@ -119,14 +170,14 @@ Sub-questions:
     subqueries = [q for q in subqueries if len(q.split()) > 2]  # filter out junk
     return subqueries if subqueries else [user_query]
 
-def rag_pipeline(user_query, system_prompt=None, top_k=3):
+def rag_pipeline(user_query, system_prompt=None, top_k=3, embedding_model_name=None):
     if system_prompt is None:
-        system_prompt = """You are a helpful assistant. Please use context from the documents to answer questions. 
+        system_prompt = """You are a helpful assistant. Please use context from the documents to answer questions.
         Pay special attention to tables and structured data marked with [TABLE] and [END TABLE] tags.
         When referencing data from tables, be precise and cite the specific rows or columns.
         If insufficient context, say so."""
 
-    results = search_query(user_query, n_results=top_k)
+    results = search_query(user_query, n_results=top_k, embedding_model_name=embedding_model_name)
     chunks = results["documents"][0]
     metadatas = results["metadatas"][0]
     scores = results["distances"][0]
@@ -161,38 +212,39 @@ Question: {user_query}
 Answer:"""
     return prompt, chunks, metadatas, scores
 
-def generate_answer(user_query, provider="cerebras", model_name="llama-4-scout-17b-16e-instruct", top_k=3):
-    # Step 1: Decompose complex query
-    subqueries = decompose_query(user_query, provider, model_name)
-
-    st.write(f"🧩 Split into {len(subqueries)} sub-queries:")
-    for sq in subqueries:
-        st.markdown(f"- {sq}")
-
+def generate_answer(user_query, provider="cerebras", model_name="llama-4-scout-17b-16e-instruct", top_k=3, use_decomposition=True, embedding_model_name=None):
     all_contexts = []
     all_chunks, all_metas, all_scores = [], [], []
 
-    # Step 2: For each subquery, retrieve context
-    for sq in subqueries:
-        results = search_query(sq, n_results=top_k)
-        chunks = results["documents"][0]
-        metadatas = results["metadatas"][0]
-        scores = results["distances"][0]
+    if use_decomposition:
+        # Step 1: Decompose complex query
+        subqueries = decompose_query(user_query, provider, model_name)
 
-        # Store for final context
-        for i, chunk in enumerate(chunks):
-            all_contexts.append(f"Subquery: {sq}\nContext {i+1} (Score: {scores[i]:.4f}):\n{chunk}")
-        all_chunks.extend(chunks)
-        all_metas.extend(metadatas)
-        all_scores.extend(scores)
+        st.write(f"🧩 Split into {len(subqueries)} sub-queries:")
+        for sq in subqueries:
+            st.markdown(f"- {sq}")
 
-    # Step 3: Build combined final prompt
-    system_prompt = """You are a helpful assistant using retrieved document contexts to answer user questions accurately.
+        # Step 2: For each subquery, retrieve context
+        for sq in subqueries:
+            results = search_query(sq, n_results=top_k, embedding_model_name=embedding_model_name)
+            chunks = results["documents"][0]
+            metadatas = results["metadatas"][0]
+            scores = results["distances"][0]
+
+            # Store for final context
+            for i, chunk in enumerate(chunks):
+                all_contexts.append(f"Subquery: {sq}\nContext {i+1} (Score: {scores[i]:.4f}):\n{chunk}")
+            all_chunks.extend(chunks)
+            all_metas.extend(metadatas)
+            all_scores.extend(scores)
+
+        # Step 3: Build combined final prompt
+        system_prompt = """You are a helpful assistant using retrieved document contexts to answer user questions accurately.
 Each section corresponds to one sub-question from the user. Synthesize all information into a coherent, well-structured final answer."""
 
-    combined_context = "\n\n".join(all_contexts)
+        combined_context = "\n\n".join(all_contexts)
 
-    final_prompt = f"""{system_prompt}
+        final_prompt = f"""{system_prompt}
 
 Retrieved Contexts:
 {combined_context}
@@ -200,6 +252,30 @@ Retrieved Contexts:
 Original User Question: {user_query}
 
 Final Answer:
+"""
+    else:
+        # Direct retrieval without query decomposition
+        results = search_query(user_query, n_results=top_k, embedding_model_name=embedding_model_name)
+        all_chunks = results["documents"][0]
+        all_metas = results["metadatas"][0]
+        all_scores = results["distances"][0]
+
+        # Build context
+        for i, chunk in enumerate(all_chunks):
+            all_contexts.append(f"Context {i+1} (Score: {all_scores[i]:.4f}):\n{chunk}")
+
+        system_prompt = """You are a helpful assistant using retrieved document contexts to answer user questions accurately."""
+
+        combined_context = "\n\n".join(all_contexts)
+
+        final_prompt = f"""{system_prompt}
+
+Retrieved Contexts:
+{combined_context}
+
+User Question: {user_query}
+
+Answer:
 """
 
     # Step 4: Ask final LLM to synthesize answer
@@ -355,19 +431,30 @@ st.sidebar.info(f"🗄️ Current Vector DB: {vector_db_option}")
 # Embedding model selection
 embedding_model_option = st.sidebar.selectbox(
     "Embedding Model",
-    ["sentence-transformers/all-MiniLM-L6-v2", "nomic-ai/nomic-embed-text-v1.5"],
-    index=1
+    [
+        "sentence-transformers/all-MiniLM-L6-v2",
+        "nomic-ai/nomic-embed-text-v1.5",
+        "cohere/embed-english-v3.0",
+        "cohere/embed-multilingual-v3.0",
+        "cohere/embed-english-light-v3.0",
+        "cohere/embed-multilingual-light-v3.0"
+    ],
+    index=1,
+    help="Select embedding model. Cohere models support 100+ languages!"
 )
 
 # Load the selected embedding model
 model = load_embedding_model(embedding_model_option)
-st.sidebar.info(f"📊 Current embedding model: {embedding_model_option}")
+if embedding_model_option.startswith("cohere/"):
+    st.sidebar.info(f"📊 Current embedding model: {embedding_model_option} (Multilingual Support ✨)")
+else:
+    st.sidebar.info(f"📊 Current embedding model: {embedding_model_option}")
 
 # LLM API Provider selection
 llm_provider = st.sidebar.selectbox(
     "LLM Provider",
     ["Cerebras", "Groq", "Ollama"],
-    index=0
+    index=2
 )
 
 # LLM model selection based on provider
@@ -408,7 +495,29 @@ chunk_overlap = st.sidebar.slider("Chunk Overlap", min_value=0, max_value=500, v
 top_k = st.sidebar.slider("Top K (retrieved chunks)", min_value=1, max_value=10, value=3, step=1)
 
 # Vision model toggle
-use_vision = st.sidebar.checkbox("Use Vision Model for Images (Groq)", value=True, help="Extract context from non-text images using Groq's vision model")
+use_vision = st.sidebar.checkbox("Use Vision Model for Images", value=True, help="Extract context from non-text images using vision model")
+
+# Vision provider selection
+if use_vision:
+    vision_provider = st.sidebar.selectbox(
+        "Vision Model Provider",
+        ["Groq", "Ollama"],
+        index=0,
+        help="Choose between Groq (cloud-based) or Ollama (local)"
+    )
+
+    if vision_provider == "Groq":
+        vision_model = "meta-llama/llama-4-scout-17b-16e-instruct"
+        st.sidebar.info("🔍 Using Groq Llama Vision")
+    else:  # Ollama
+        vision_model = "llava:7b"
+        st.sidebar.info("🔍 Using Ollama Llava 7B (local)")
+else:
+    vision_provider = "groq"
+    vision_model = "meta-llama/llama-4-scout-17b-16e-instruct"
+
+# Query decomposition toggle
+use_query_decomposition = st.sidebar.checkbox("Use Query Decomposition", value=True, help="Split complex queries into simpler sub-queries for better retrieval")
 
 # Add reprocess button
 reprocess = st.sidebar.button("🔄 Reprocess Documents")
@@ -438,10 +547,34 @@ with st.sidebar.expander("ℹ️ PDF Processing Info"):
 
     **Image Processing:**
     - First tries OCR to extract text from images
-    - If no text found, uses Groq vision model to describe image content
+    - If no text found, uses vision model to describe image content
     - Supports charts, diagrams, photos, and visual elements
 
+    **Vision Model Options:**
+    - **Groq**: Cloud-based (fast, may have rate limits)
+    - **Ollama**: Local (no rate limits, requires llava:7b installed)
+
     Tables are marked with [TABLE] tags, images with [IMAGE DESCRIPTION] tags.
+    """)
+
+with st.sidebar.expander("ℹ️ Embedding Models Info"):
+    st.write("""
+    **Local Models (Sentence Transformers):**
+    - all-MiniLM-L6-v2: Fast, English-only
+    - nomic-embed-text-v1.5: High quality, English-only
+
+    **Cohere API Models (Multilingual):**
+    - embed-english-v3.0: High quality, English
+    - embed-multilingual-v3.0: 100+ languages ⭐
+    - embed-english-light-v3.0: Faster, smaller
+    - embed-multilingual-light-v3.0: Fast, multilingual
+
+    **Supported Languages (Multilingual):**
+    Arabic, Chinese, English, French, German, Hindi,
+    Italian, Japanese, Korean, Portuguese, Russian,
+    Spanish, and 90+ more languages!
+
+    **Note:** Cohere models require API key and internet connection.
     """)
 
 with st.sidebar.expander("ℹ️ Vector Database Info"):
@@ -450,7 +583,7 @@ with st.sidebar.expander("ℹ️ Vector Database Info"):
     - In-memory storage
     - Built-in metadata filtering
     - Easy to use
-    
+
     **FAISS:**
     - High-performance similarity search
     - Better for large datasets (>100k vectors)
@@ -545,7 +678,7 @@ if uploaded_files:
                 file_paths.append(file_path)
 
             with st.spinner("Extracting text, tables, and images from documents..."):
-                documents = extract_text_from_multiple_files(file_paths, use_vision)
+                documents = extract_text_from_multiple_files(file_paths, use_vision, vision_provider.lower(), vision_model)
                 all_documents.extend(documents)
 
         # -------------------------------
@@ -561,7 +694,7 @@ if uploaded_files:
 
             with st.spinner("Analyzing images with vision model..."):
                 for img_path in image_paths:
-                    docs = extract_from_standalone_image(img_path)
+                    docs = extract_from_standalone_image(img_path, model=vision_model, provider=vision_provider.lower())
                     all_documents.extend(docs)
 
         # -------------------------------
@@ -572,7 +705,7 @@ if uploaded_files:
                 chunks = split_chunk_overlap(all_documents, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
             with st.spinner("Generating embeddings..."):
-                texts, embeddings = embed_chunks(chunks)
+                texts, embeddings = embed_chunks(chunks, embedding_model_option)
 
             with st.spinner(f"Storing in {vector_db_option}..."):
                 store_in_vector_db(vector_db, chunks, embeddings)
@@ -617,7 +750,14 @@ if vector_db.count() > 0:
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 start_time = time.time()
-                answer, retrieved_chunks, metadatas, scores = generate_answer(query, llm_provider, llm_model_option, top_k)
+                answer, retrieved_chunks, metadatas, scores = generate_answer(
+                    query,
+                    llm_provider,
+                    llm_model_option,
+                    top_k,
+                    use_query_decomposition,
+                    embedding_model_option
+                )
                 response_time = time.time() - start_time
 
             # Display assistant response

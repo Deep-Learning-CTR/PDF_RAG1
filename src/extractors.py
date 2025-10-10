@@ -20,51 +20,80 @@ warnings.filterwarnings('ignore', message='.*is image-based, camelot only works 
 
 # Set Tesseract path for Windows (adjust if installed elsewhere)
 if os.name == 'nt':  # Windows
-    tesseract_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    tesseract_path = r'C:\\Users\\charb\\AppData\\Local\\Programs\\Tesseract-OCR\\tesseract.exe'
     if os.path.exists(tesseract_path):
         pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
 # Initialize Groq client for vision models
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
-def describe_image_with_vision(image_pil, model="meta-llama/llama-4-scout-17b-16e-instruct"):
-    """Use Groq's vision model to describe image content"""
+def describe_image_with_vision(image_pil, model="meta-llama/llama-4-scout-17b-16e-instruct", provider="groq"):
+    """Use vision model to describe image content
+
+    Args:
+        image_pil: PIL Image object
+        model: Model name (groq model name or ollama model name)
+        provider: "groq" or "ollama"
+    """
     try:
         # Convert PIL image to base64
         buffered = BytesIO()
         image_pil.save(buffered, format="PNG")
         img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-        # Call Groq vision API
-        response = groq_client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Describe this image in detail. Include what objects, people, charts, diagrams, or visual elements are present. Be concise but informative."
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{img_base64}"
+        if provider.lower() == "groq":
+            # Call Groq vision API
+            response = groq_client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Describe this image in detail. Include what objects, people, charts, diagrams, or visual elements are present. Be concise but informative."
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{img_base64}"
+                                }
                             }
-                        }
-                    ]
-                }
-            ],
-            temperature=0,
-            max_tokens=300
-        )
+                        ]
+                    }
+                ],
+                temperature=0,
+                max_tokens=300
+            )
+            return response.choices[0].message.content
 
-        return response.choices[0].message.content
+        elif provider.lower() == "ollama":
+            # Call Ollama vision API (llava)
+            import requests
+            response = requests.post(
+                'http://localhost:11434/api/generate',
+                json={
+                    'model': model,
+                    'prompt': 'Describe this image in detail. Include what objects, people, charts, diagrams, or visual elements are present. Be concise but informative.',
+                    'images': [img_base64],
+                    'stream': False
+                }
+            )
+
+            if response.status_code == 200:
+                return response.json()['response']
+            else:
+                print(f"Ollama API error: {response.status_code}")
+                return None
+        else:
+            print(f"Unknown provider: {provider}")
+            return None
+
     except Exception as e:
-        print(f"Error describing image with vision model: {e}")
+        print(f"Error describing image with vision model ({provider}): {e}")
         return None
 
-def extract_all_from_pdf_page(page, page_num, use_camelot_tables=None, use_vision=True):
+def extract_all_from_pdf_page(page, page_num, use_camelot_tables=None, use_vision=True, vision_provider="groq", vision_model="meta-llama/llama-4-scout-17b-16e-instruct"):
     """Extract text, tables, and images from a single PDF page"""
     extracted_data = {
         'text': '',
@@ -114,7 +143,7 @@ def extract_all_from_pdf_page(page, page_num, use_camelot_tables=None, use_visio
 
                 # If no text found via OCR and vision is enabled, use vision model
                 elif use_vision:
-                    description = describe_image_with_vision(pil_img)
+                    description = describe_image_with_vision(pil_img, model=vision_model, provider=vision_provider)
                     if description:
                         extracted_data['image_descriptions'].append(f"\n[IMAGE {i+1} DESCRIPTION]\n{description}\n[END IMAGE {i+1}]\n")
 
@@ -130,7 +159,7 @@ def extract_all_from_pdf_page(page, page_num, use_camelot_tables=None, use_visio
     return extracted_data
 
 
-def extract_text_from_pdf_advanced(pdf_path, use_vision=True):
+def extract_text_from_pdf_advanced(pdf_path, use_vision=True, vision_provider="groq", vision_model="meta-llama/llama-4-scout-17b-16e-instruct"):
     """Extract text, tables, and images from PDF in a single pass"""
     documents = []
     filename = os.path.basename(pdf_path)
@@ -150,7 +179,7 @@ def extract_text_from_pdf_advanced(pdf_path, use_vision=True):
         with pdfplumber.open(pdf_path) as pdf:
             for page_num, page in enumerate(pdf.pages, start=1):
                 # Extract everything in one pass
-                page_data = extract_all_from_pdf_page(page, page_num, camelot_tables, use_vision)
+                page_data = extract_all_from_pdf_page(page, page_num, camelot_tables, use_vision, vision_provider, vision_model)
 
                 # Combine all extracted content
                 combined_text = page_data['text'] or ""
@@ -232,19 +261,19 @@ def extract_text_from_excel(excel_path):
     return documents
 
 
-def extract_text_from_multiple_files(file_paths, use_vision=True):
+def extract_text_from_multiple_files(file_paths, use_vision=True, vision_provider="groq", vision_model="meta-llama/llama-4-scout-17b-16e-instruct"):
     """Extract text from multiple PDF and Excel files"""
     all_documents = []
     for file_path in file_paths:
         ext = os.path.splitext(file_path)[1].lower()
         if ext == ".pdf":
-            all_documents.extend(extract_text_from_pdf_advanced(file_path, use_vision))
+            all_documents.extend(extract_text_from_pdf_advanced(file_path, use_vision, vision_provider, vision_model))
         elif ext in [".xlsx", ".xls"]:
             all_documents.extend(extract_text_from_excel(file_path))
     return all_documents
 
 
-def extract_from_standalone_image(image_path, model="meta-llama/llama-4-scout-17b-16e-instruct"):
+def extract_from_standalone_image(image_path, model="meta-llama/llama-4-scout-17b-16e-instruct", provider="groq"):
     """Extract description from a standalone image file using vision model"""
     documents = []
     filename = os.path.basename(image_path)
@@ -257,7 +286,7 @@ def extract_from_standalone_image(image_path, model="meta-llama/llama-4-scout-17
         ocr_text = pytesseract.image_to_string(pil_img)
 
         # Get vision description
-        vision_description = describe_image_with_vision(pil_img, model)
+        vision_description = describe_image_with_vision(pil_img, model=model, provider=provider)
 
         # Combine OCR and vision results
         combined_text = ""

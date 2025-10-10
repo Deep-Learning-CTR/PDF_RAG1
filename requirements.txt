@@ -12,3 +12,4 @@ pdfplumber
 camelot-py
 groq
 openpyxl
+cohere
